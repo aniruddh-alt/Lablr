@@ -1,0 +1,57 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: lablr
+      POSTGRES_USER: lablr
+      POSTGRES_PASSWORD: lablr_dev_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      DATABASE_URL: postgresql://lablr:lablr_dev_password@postgres:5432/lablr
+      REDIS_URL: redis://redis:6379
+      AZURE_STORAGE_CONNECTION_STRING: ""
+      AZURE_FORM_RECOGNIZER_ENDPOINT: ""
+      AZURE_COGNITIVE_SERVICES_ENDPOINT: ""
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./src:/app/src
+      - ./uploads:/app/uploads
+
+  worker:
+    build: .
+    command: celery -A src.workers.celery_app worker --loglevel=info
+    environment:
+      DATABASE_URL: postgresql://lablr:lablr_dev_password@postgres:5432/lablr
+      REDIS_URL: redis://redis:6379
+      AZURE_STORAGE_CONNECTION_STRING: ""
+      AZURE_FORM_RECOGNIZER_ENDPOINT: ""
+      AZURE_COGNITIVE_SERVICES_ENDPOINT: ""
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./src:/app/src
+      - ./uploads:/app/uploads
+
+volumes:
+  postgres_data:
+  redis_data:

@@ -1,0 +1,58 @@
+name: lablr
+metadata:
+  template: lablr-ai-data-labeler@0.0.1
+infra:
+  provider: bicep
+  path: infra
+
+services:
+  api:
+    project: ./src
+    language: python
+    host: containerapp
+    docker:
+      path: ./Dockerfile
+    env:
+      - AZURE_STORAGE_CONNECTION_STRING
+      - AZURE_FORM_RECOGNIZER_ENDPOINT
+      - AZURE_COGNITIVE_SERVICES_ENDPOINT
+      - AZURE_ML_WORKSPACE_NAME
+      - DATABASE_URL
+      - REDIS_URL
+      - SERVICE_BUS_CONNECTION_STRING
+    secrets:
+      - AZURE_STORAGE_CONNECTION_STRING
+      - DATABASE_URL
+      - REDIS_URL
+      - SERVICE_BUS_CONNECTION_STRING
+
+  web:
+    project: ./web
+    language: typescript
+    host: staticwebapp
+    dist: build
+    env:
+      - REACT_APP_API_BASE_URL
+
+hooks:
+  preprovision:
+    posix:
+      shell: sh
+      run: |
+        echo "Preparing infrastructure..."
+    windows:
+      shell: pwsh
+      run: |
+        Write-Host "Preparing infrastructure..."
+
+  postprovision:
+    posix:
+      shell: sh
+      run: |
+        echo "Setting up database..."
+        # Add database migration commands here
+    windows:
+      shell: pwsh
+      run: |
+        Write-Host "Setting up database..."
+        # Add database migration commands here
