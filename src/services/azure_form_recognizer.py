@@ -128,8 +128,8 @@ class AzureFormRecognizerService:
             confidence_count = 0
             
             for page in extracted_data["pages"]:
-                for line in page["lines"]:
-                    if line["confidence"] > 0:
+                for line in page.get("lines", []):
+                    if "confidence" in line:
                         total_confidence += line["confidence"]
                         confidence_count += 1
             
@@ -176,18 +176,21 @@ class AzureFormRecognizerService:
             if result.styles:
                 for style in result.styles:
                     style_data = {
-                        "is_handwritten": getattr(style, 'is_handwritten', False),
-                        "confidence": getattr(style, 'confidence', 0.0),
-                        "spans": []
+                        "style_name": style.name if hasattr(style, 'name') else "unknown",
+                        "confidence": style.confidence if hasattr(style, 'confidence') else 0.0,
+                        "appearance": {}
                     }
                     
-                    if style.spans:
-                        for span in style.spans:
-                            style_data["spans"].append({
-                                "offset": span.offset,
-                                "length": span.length
-                            })
-                    
+                    # Safely check if appearance attribute exists before trying to access its properties
+                    if hasattr(style, 'appearance'):
+                        appearance = style.appearance
+                        style_data["appearance"] = {
+                            "font_family": appearance.font_family if hasattr(appearance, 'font_family') else None,
+                            "font_size": appearance.font_size if hasattr(appearance, 'font_size') else None,
+                            "font_weight": appearance.font_weight if hasattr(appearance, 'font_weight') else None,
+                            "font_style": appearance.font_style if hasattr(appearance, 'font_style') else None,
+                            "color": appearance.color if hasattr(appearance, 'color') else None
+                        }
                     structure_data["styles"].append(style_data)
             
             logger.info(f"Successfully analyzed document structure: {file_path}")
@@ -224,15 +227,27 @@ class AzureFormRecognizerService:
             if result.key_value_pairs:
                 total_confidence = 0
                 for kv_pair in result.key_value_pairs:
-                    pair_data = {
-                        "key": kv_pair.key.content if kv_pair.key else "",
-                        "value": kv_pair.value.content if kv_pair.value else "",
-                        "confidence": kv_pair.confidence if hasattr(kv_pair, 'confidence') else 0.0
+                    kv_item = {
+                        "key": kv_pair.key.content if kv_pair.key else None,
+                        "value": kv_pair.value.content if kv_pair.value else None,
+                        "key_confidence": kv_pair.key.confidence if kv_pair.key and hasattr(kv_pair.key, 'confidence') else 0.0,
+                        "value_confidence": kv_pair.value.confidence if kv_pair.value and hasattr(kv_pair.value, 'confidence') else 0.0
                     }
                     
-                    kv_data["key_value_pairs"].append(pair_data)
-                    total_confidence += pair_data["confidence"]
+                    # Calculate confidence
+                    pair_confidence = (kv_item["key_confidence"] + kv_item["value_confidence"]) / 2
+                    total_confidence += pair_confidence
+                    
+                    # Add page numbers
+                    key_page = kv_pair.key.bounding_regions[0].page_number if kv_pair.key and kv_pair.key.bounding_regions else None
+                    value_page = kv_pair.value.bounding_regions[0].page_number if kv_pair.value and kv_pair.value.bounding_regions else None
+                    
+                    kv_item["key_page"] = key_page
+                    kv_item["value_page"] = value_page
+                    
+                    kv_data["key_value_pairs"].append(kv_item)
                 
+                # Calculate average confidence
                 if len(result.key_value_pairs) > 0:
                     kv_data["confidence"] = total_confidence / len(result.key_value_pairs)
             

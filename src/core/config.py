@@ -1,6 +1,7 @@
 from pydantic_settings import BaseSettings
-from typing import Optional
+from typing import Optional, List
 import os
+import json
 
 class Settings(BaseSettings):
     """Application settings and configuration."""
@@ -43,16 +44,38 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 30
     
     # File Storage
-    max_file_size: int = 50 * 1024 * 1024  # 50MB
-    upload_dir: str = "uploads"
+    max_file_size: int = int(os.getenv("MAX_FILE_SIZE", 50 * 1024 * 1024))  # 50MB
+    upload_dir: str = os.getenv("UPLOAD_DIR", "uploads")
+    output_dir: str = os.getenv("OUTPUT_DIR", "outputs")
     
     # Processing
-    max_concurrent_jobs: int = 10
-    job_timeout: int = 3600  # 1 hour
+    max_concurrent_jobs: int = int(os.getenv("MAX_CONCURRENT_JOBS", 10))
+    job_timeout: int = int(os.getenv("JOB_TIMEOUT", 3600))  # 1 hour
+    batch_size: int = int(os.getenv("BATCH_SIZE", 5))
+    
+    # API Settings
+    api_host: str = os.getenv("API_HOST", "0.0.0.0")
+    api_port: int = int(os.getenv("API_PORT", 8000))
+    
+    # Logging
+    log_level: str = os.getenv("LOG_LEVEL", "INFO")
+    
+    # CORS
+    cors_origins: List[str] = []
     
     class Config:
         env_file = ".env"
         case_sensitive = False
+
+    def __init__(self, **data):
+        super().__init__(**data)
+        # Parse cors_origins from environment variable if it exists
+        cors_env = os.getenv("CORS_ORIGINS")
+        if cors_env:
+            try:
+                self.cors_origins = json.loads(cors_env)
+            except:
+                self.cors_origins = ["http://localhost:3000", "http://localhost:8080"]
 
 def get_settings() -> Settings:
     """Get application settings."""

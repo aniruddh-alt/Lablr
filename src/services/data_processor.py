@@ -1,12 +1,10 @@
-import pandas as pd
-import json
-import csv
-import logging
 from typing import Dict, List, Any, Optional, Union
-import io
 from datetime import datetime
-import os
 from pathlib import Path
+import json
+import pandas as pd
+import logging
+import os
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +54,9 @@ class DataProcessor:
             elif output_format.lower() == "xlsx":
                 return self._to_xlsx(results, extraction_type, job_name)
             else:
-                raise ValueError(f"Unsupported output format: {output_format}")
+                # Default to JSON if format not recognized
+                logger.warning(f"Unrecognized output format '{output_format}', defaulting to JSON")
+                return self._to_json(results, job_name)
                 
         except Exception as e:
             logger.error(f"Error processing extraction results: {str(e)}")
@@ -69,60 +69,63 @@ class DataProcessor:
             csv_data = []
             
             for result in results:
-                if result.get("status") == "success" and "result" in result:
-                    row = {
-                        "document_id": result["document_id"],
-                        "status": result["status"]
-                    }
-                    
-                    # Extract the actual data based on extraction type
-                    if extraction_type == "structured_data":
-                        extracted_data = result["result"].get("extracted_data", {})
-                        row.update(self._flatten_dict(extracted_data))
-                    elif extraction_type == "classification":
-                        classification_data = result["result"]
-                        row.update({
-                            "classification": classification_data.get("classification"),
-                            "confidence": classification_data.get("confidence"),
-                            "reasoning": classification_data.get("reasoning")
-                        })
-                    elif extraction_type == "entity_extraction":
-                        entities = result["result"]
-                        # Create columns for each entity type
-                        for entity_type, entity_list in entities.items():
-                            entity_texts = [entity.get("text", "") for entity in entity_list if isinstance(entity, dict)]
-                            row[f"{entity_type}_entities"] = "; ".join(entity_texts)
-                    elif extraction_type == "summarization":
-                        summary_data = result["result"]
-                        row.update(self._flatten_dict(summary_data))
-                    elif extraction_type == "qa_generation":
-                        qa_pairs = result["result"]
-                        if isinstance(qa_pairs, list) and qa_pairs:
-                            # For CSV, we'll create separate rows for each Q&A pair
-                            for i, qa in enumerate(qa_pairs):
-                                qa_row = row.copy()
-                                qa_row.update({
-                                    "question_number": i + 1,
-                                    "question": qa.get("question", ""),
-                                    "answer": qa.get("answer", "")
-                                })
-                                csv_data.append(qa_row)
-                            continue
-                    
-                    csv_data.append(row)
-                else:
-                    # Handle failed extractions
+                # Skip failed extractions
+                if result.get("status") == "error" or "error" in result:
+                    continue
+                
+                document_id = result.get("document_id", "unknown")
+                
+                # Handle different extraction types
+                if extraction_type == "structured_data":
+                    # Get the extracted data
+                    extracted = result.get("extracted_data", {})
+                    if isinstance(extracted, dict):
+                        # Flatten nested dictionaries
+                        flattened = self._flatten_dict(extracted)
+                        flattened["document_id"] = document_id
+                        csv_data.append(flattened)
+                
+                elif extraction_type == "entity_extraction":
+                    # For entities, create one row per entity
+                    for entity_type, entities in result.items():
+                        if isinstance(entities, list) and entity_type != "entity_types":
+                            for entity in entities:
+                                if isinstance(entity, dict):
+                                    entity_row = {
+                                        "document_id": document_id,
+                                        "entity_type": entity_type,
+                                        "entity_text": entity.get("text", ""),
+                                        "confidence": entity.get("confidence", 0.0)
+                                    }
+                                    csv_data.append(entity_row)
+                
+                elif extraction_type == "classification":
+                    # For classification, one row per document
                     csv_data.append({
-                        "document_id": result["document_id"],
-                        "status": result.get("status", "error"),
-                        "error": result.get("error", "Unknown error")
+                        "document_id": document_id,
+                        "primary_class": result.get("primary_class", ""),
+                        "confidence": result.get("confidence", 0.0),
+                        "sub_classes": ", ".join(result.get("sub_classes", [])),
+                        "reasoning": result.get("reasoning", "")
                     })
+                
+                else:
+                    # Generic approach for other extraction types
+                    result_copy = result.copy()
+                    if "token_usage" in result_copy:
+                        del result_copy["token_usage"]
+                    flattened = self._flatten_dict(result_copy)
+                    csv_data.append(flattened)
             
             # Create DataFrame and save to CSV
             if csv_data:
                 df = pd.DataFrame(csv_data)
+                
+                # Generate filename
                 filename = f"{job_name}_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
                 file_path = self.output_dir / filename
+                
+                # Save to CSV
                 df.to_csv(file_path, index=False)
                 
                 return {
@@ -130,11 +133,15 @@ class DataProcessor:
                     "file_path": str(file_path),
                     "filename": filename,
                     "row_count": len(df),
-                    "column_count": len(df.columns),
-                    "columns": list(df.columns)
+                    "column_count": len(df.columns)
                 }
             else:
-                raise ValueError("No data to convert to CSV")
+                # No valid data to convert
+                return {
+                    "format": "csv",
+                    "error": "No valid data to convert to CSV",
+                    "row_count": 0
+                }
                 
         except Exception as e:
             logger.error(f"Error converting to CSV: {str(e)}")
@@ -148,15 +155,15 @@ class DataProcessor:
             
             output_data = {
                 "job_name": job_name,
-                "generated_at": datetime.utcnow().isoformat(),
+                "generated_at": datetime.now().isoformat(),
                 "total_documents": len(results),
-                "successful_extractions": len([r for r in results if r.get("status") == "success"]),
-                "failed_extractions": len([r for r in results if r.get("status") != "success"]),
+                "successful_extractions": len([r for r in results if r.get("status") != "error" and "error" not in r]),
+                "failed_extractions": len([r for r in results if r.get("status") == "error" or "error" in r]),
                 "results": results
             }
             
             with open(file_path, 'w') as f:
-                json.dump(output_data, f, indent=2, default=str)
+                json.dump(output_data, f, indent=2)
             
             return {
                 "format": "json",
@@ -175,16 +182,18 @@ class DataProcessor:
             filename = f"{job_name}_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jsonl"
             file_path = self.output_dir / filename
             
+            line_count = 0
             with open(file_path, 'w') as f:
                 for result in results:
-                    json.dump(result, f, default=str)
+                    json.dump(result, f)
                     f.write('\n')
+                    line_count += 1
             
             return {
                 "format": "jsonl",
                 "file_path": str(file_path),
                 "filename": filename,
-                "line_count": len(results)
+                "line_count": line_count
             }
             
         except Exception as e:
@@ -194,53 +203,69 @@ class DataProcessor:
     def _to_qa_pairs(self, results: List[Dict[str, Any]], job_name: str) -> Dict[str, Any]:
         """Convert results to Q&A pairs format."""
         try:
-            qa_pairs = []
-            
-            for result in results:
-                if result.get("status") == "success" and "result" in result:
-                    qa_data = result["result"]
-                    if isinstance(qa_data, list):
-                        # Direct Q&A pairs
-                        for qa in qa_data:
-                            if isinstance(qa, dict) and "question" in qa and "answer" in qa:
-                                qa_pairs.append({
-                                    "document_id": result["document_id"],
-                                    "question": qa["question"],
-                                    "answer": qa["answer"]
-                                })
-                    elif isinstance(qa_data, dict) and "qa_pairs" in qa_data:
-                        # Q&A pairs in nested structure
-                        for qa in qa_data["qa_pairs"]:
-                            if isinstance(qa, dict) and "question" in qa and "answer" in qa:
-                                qa_pairs.append({
-                                    "document_id": result["document_id"],
-                                    "question": qa["question"],
-                                    "answer": qa["answer"]
-                                })
-            
-            # Save as JSON
-            filename = f"{job_name}_qa_pairs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            filename = f"{job_name}_qa_pairs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
             file_path = self.output_dir / filename
             
-            output_data = {
-                "job_name": job_name,
-                "generated_at": datetime.utcnow().isoformat(),
-                "total_qa_pairs": len(qa_pairs),
-                "qa_pairs": qa_pairs
-            }
+            json_filename = f"{job_name}_qa_pairs_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+            json_file_path = self.output_dir / json_filename
+            
+            qa_count = 0
+            all_qa_pairs = []
             
             with open(file_path, 'w') as f:
-                json.dump(output_data, f, indent=2, default=str)
+                f.write(f"# {job_name} - Generated Q&A Pairs\n\n")
+                f.write(f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                
+                for i, result in enumerate(results):
+                    document_id = result.get("document_id", f"document_{i}")
+                    
+                    # Skip if there was an error or no QA pairs
+                    if result.get("status") == "error" or "error" in result:
+                        continue
+                    
+                    qa_pairs = result.get("qa_pairs", [])
+                    if not qa_pairs:
+                        continue
+                    
+                    # Write document header
+                    f.write(f"## Document: {document_id}\n\n")
+                    
+                    # Write QA pairs
+                    for j, qa in enumerate(qa_pairs):
+                        if isinstance(qa, dict) and "question" in qa and "answer" in qa:
+                            qa_count += 1
+                            f.write(f"### Q{j+1}: {qa['question']}\n\n")
+                            f.write(f"{qa['answer']}\n\n")
+                            
+                            # Add to all pairs with document reference
+                            qa_with_source = {
+                                "question": qa["question"],
+                                "answer": qa["answer"],
+                                "document_id": document_id,
+                                "qa_id": f"{document_id}_q{j+1}"
+                            }
+                            all_qa_pairs.append(qa_with_source)
+            
+            # Save JSON format as well
+            with open(json_file_path, 'w') as f:
+                json.dump({
+                    "job_name": job_name,
+                    "generated_at": datetime.now().isoformat(),
+                    "total_qa_pairs": qa_count,
+                    "qa_pairs": all_qa_pairs
+                }, f, indent=2)
             
             return {
                 "format": "qa_pairs",
                 "file_path": str(file_path),
+                "json_file_path": str(json_file_path),
                 "filename": filename,
-                "qa_pair_count": len(qa_pairs)
+                "json_filename": json_filename,
+                "qa_count": qa_count
             }
             
         except Exception as e:
-            logger.error(f"Error converting to Q&A pairs: {str(e)}")
+            logger.error(f"Error converting to QA pairs: {str(e)}")
             raise
     
     def _to_markdown(self, results: List[Dict[str, Any]], extraction_type: str, job_name: str) -> Dict[str, Any]:
@@ -251,36 +276,67 @@ class DataProcessor:
             
             with open(file_path, 'w') as f:
                 f.write(f"# {job_name} - Extraction Results\n\n")
-                f.write(f"**Generated:** {datetime.utcnow().isoformat()}\n")
+                f.write(f"**Generated:** {datetime.now().isoformat()}\n")
                 f.write(f"**Extraction Type:** {extraction_type}\n")
-                f.write(f"**Total Documents:** {len(results)}\n\n")
+                f.write(f"**Document Count:** {len(results)}\n\n")
                 
-                for i, result in enumerate(results, 1):
-                    f.write(f"## Document {i}: {result['document_id']}\n\n")
+                for i, result in enumerate(results):
+                    document_id = result.get("document_id", f"document_{i}")
                     
-                    if result.get("status") == "success" and "result" in result:
-                        if extraction_type == "qa_generation":
-                            qa_pairs = result["result"]
-                            if isinstance(qa_pairs, list):
-                                for j, qa in enumerate(qa_pairs, 1):
-                                    f.write(f"### Q&A Pair {j}\n")
-                                    f.write(f"**Question:** {qa.get('question', 'N/A')}\n\n")
-                                    f.write(f"**Answer:** {qa.get('answer', 'N/A')}\n\n")
-                        elif extraction_type == "summarization":
-                            summary = result["result"]
-                            for key, value in summary.items():
-                                f.write(f"**{key.replace('_', ' ').title()}:** {value}\n\n")
-                        else:
-                            # Generic format for other types
-                            data = result["result"]
-                            if isinstance(data, dict):
-                                for key, value in data.items():
-                                    f.write(f"**{key.replace('_', ' ').title()}:** {value}\n\n")
+                    # Skip if error
+                    if result.get("status") == "error" or "error" in result:
+                        f.write(f"## Document: {document_id} (Error)\n\n")
+                        f.write(f"Error: {result.get('error', 'Unknown error')}\n\n")
+                        continue
+                    
+                    f.write(f"## Document: {document_id}\n\n")
+                    
+                    # Format based on extraction type
+                    if extraction_type == "structured_data":
+                        extracted = result.get("extracted_data", {})
+                        f.write("### Extracted Data\n\n")
+                        f.write("```json\n")
+                        f.write(json.dumps(extracted, indent=2))
+                        f.write("\n```\n\n")
+                    
+                    elif extraction_type == "qa_generation":
+                        qa_pairs = result.get("qa_pairs", [])
+                        f.write("### Generated Q&A Pairs\n\n")
+                        for j, qa in enumerate(qa_pairs):
+                            if isinstance(qa, dict) and "question" in qa and "answer" in qa:
+                                f.write(f"**Q{j+1}:** {qa['question']}\n\n")
+                                f.write(f"**A:** {qa['answer']}\n\n")
+                    
+                    elif extraction_type == "summarization":
+                        f.write("### Summary\n\n")
+                        f.write(result.get("summary", "No summary available"))
+                        f.write("\n\n")
+                        
+                        if "key_points" in result and isinstance(result["key_points"], list):
+                            f.write("### Key Points\n\n")
+                            for point in result["key_points"]:
+                                f.write(f"- {point}\n")
+                            f.write("\n")
+                    
+                    elif extraction_type == "classification":
+                        f.write("### Classification\n\n")
+                        f.write(f"**Primary Class:** {result.get('primary_class', 'Unknown')}\n")
+                        f.write(f"**Confidence:** {result.get('confidence', 0.0)}\n")
+                        
+                        if "reasoning" in result:
+                            f.write(f"\n**Reasoning:** {result['reasoning']}\n")
+                        
+                        if "sub_classes" in result and isinstance(result["sub_classes"], list):
+                            f.write("\n**Sub-classes:**\n")
+                            for sub in result["sub_classes"]:
+                                f.write(f"- {sub}\n")
+                    
                     else:
-                        f.write(f"**Status:** {result.get('status', 'error')}\n")
-                        f.write(f"**Error:** {result.get('error', 'Unknown error')}\n\n")
-                    
-                    f.write("---\n\n")
+                        # Generic approach
+                        f.write("### Results\n\n")
+                        f.write("```json\n")
+                        f.write(json.dumps(result, indent=2, default=str))
+                        f.write("\n```\n\n")
             
             return {
                 "format": "markdown",
@@ -299,57 +355,97 @@ class DataProcessor:
             filename = f"{job_name}_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
             file_path = self.output_dir / filename
             
-            with pd.ExcelWriter(file_path, engine='openpyxl') as writer:
-                # Summary sheet
-                summary_data = {
-                    "Metric": ["Total Documents", "Successful Extractions", "Failed Extractions", "Generated At"],
-                    "Value": [
-                        len(results),
-                        len([r for r in results if r.get("status") == "success"]),
-                        len([r for r in results if r.get("status") != "success"]),
-                        datetime.utcnow().isoformat()
-                    ]
-                }
-                summary_df = pd.DataFrame(summary_data)
-                summary_df.to_excel(writer, sheet_name='Summary', index=False)
-                
-                # Results sheet (similar to CSV logic)
-                csv_data = []
+            # Create Excel writer
+            with pd.ExcelWriter(file_path) as writer:
+                # Main results sheet
+                main_data = []
                 for result in results:
-                    if result.get("status") == "success" and "result" in result:
-                        row = {
-                            "document_id": result["document_id"],
-                            "status": result["status"]
-                        }
-                        
-                        if extraction_type == "structured_data":
-                            extracted_data = result["result"].get("extracted_data", {})
-                            row.update(self._flatten_dict(extracted_data))
-                        elif extraction_type == "classification":
-                            classification_data = result["result"]
-                            row.update({
-                                "classification": classification_data.get("classification"),
-                                "confidence": classification_data.get("confidence"),
-                                "reasoning": classification_data.get("reasoning")
-                            })
-                        
-                        csv_data.append(row)
-                    else:
-                        csv_data.append({
-                            "document_id": result["document_id"],
-                            "status": result.get("status", "error"),
-                            "error": result.get("error", "Unknown error")
-                        })
+                    # Skip failed extractions for main sheet
+                    if result.get("status") == "error" or "error" in result:
+                        continue
+                    
+                    # Create a row for each result
+                    row = {
+                        "document_id": result.get("document_id", "unknown"),
+                        "status": result.get("status", "unknown"),
+                        "processed_at": result.get("processed_at", ""),
+                        "model_used": result.get("model_used", "")
+                    }
+                    main_data.append(row)
                 
-                if csv_data:
-                    results_df = pd.DataFrame(csv_data)
-                    results_df.to_excel(writer, sheet_name='Results', index=False)
+                if main_data:
+                    df_main = pd.DataFrame(main_data)
+                    df_main.to_excel(writer, sheet_name="Summary", index=False)
+                
+                # Extraction type specific sheets
+                if extraction_type == "structured_data":
+                    # Create a sheet for structured data
+                    structured_data = []
+                    for result in results:
+                        if result.get("status") != "error" and "error" not in result:
+                            doc_id = result.get("document_id", "unknown")
+                            extracted = result.get("extracted_data", {})
+                            if isinstance(extracted, dict):
+                                flat_data = self._flatten_dict(extracted)
+                                flat_data["document_id"] = doc_id
+                                structured_data.append(flat_data)
+                    
+                    if structured_data:
+                        df_structured = pd.DataFrame(structured_data)
+                        df_structured.to_excel(writer, sheet_name="Structured_Data", index=False)
+                
+                elif extraction_type == "qa_generation":
+                    # Create a sheet for QA pairs
+                    qa_data = []
+                    for result in results:
+                        if result.get("status") != "error" and "error" not in result:
+                            doc_id = result.get("document_id", "unknown")
+                            qa_pairs = result.get("qa_pairs", [])
+                            
+                            for qa in qa_pairs:
+                                qa_data.append({
+                                    "document_id": doc_id,
+                                    "question": qa.get("question", ""),
+                                    "answer": qa.get("answer", ""),
+                                    "confidence": qa.get("confidence", "")
+                                })
+                    
+                    if qa_data:
+                        df_qa = pd.DataFrame(qa_data)
+                        df_qa.to_excel(writer, sheet_name="QA_Pairs", index=False)
+                
+                elif extraction_type == "entity_extraction":
+                    # Create sheets for each entity type
+                    entity_types = set()
+                    for result in results:
+                        if result.get("status") != "error" and "error" not in result:
+                            # Find all entity types across all documents
+                            for key in result.keys():
+                                if isinstance(result[key], list) and key not in ["document_id", "status", "token_usage"]:
+                                    entity_types.add(key)
+                    
+                    # For each entity type, create a sheet
+                    for entity_type in entity_types:
+                        entities = []
+                        for result in results:
+                            doc_id = result.get("document_id", "unknown")
+                            if entity_type in result and isinstance(result[entity_type], list):
+                                for entity in result[entity_type]:
+                                    if isinstance(entity, dict):
+                                        entity_data = entity.copy()
+                                        entity_data["document_id"] = doc_id
+                                        entities.append(entity_data)
+                        
+                        if entities:
+                            df_entities = pd.DataFrame(entities)
+                            sheet_name = entity_type[:31]  # Excel sheet names limited to 31 chars
+                            df_entities.to_excel(writer, sheet_name=sheet_name, index=False)
             
             return {
                 "format": "xlsx",
                 "file_path": str(file_path),
                 "filename": filename,
-                "sheet_count": 2
+                "document_count": len(results)
             }
             
         except Exception as e:
@@ -364,8 +460,17 @@ class DataProcessor:
             if isinstance(v, dict):
                 items.extend(self._flatten_dict(v, new_key, sep=sep).items())
             elif isinstance(v, list):
-                # Convert lists to comma-separated strings
-                items.append((new_key, ', '.join(map(str, v))))
+                # Handle lists by joining with semicolons
+                if all(isinstance(item, (str, int, float)) for item in v):
+                    items.append((new_key, "; ".join(str(i) for i in v)))
+                elif len(v) > 0 and all(isinstance(item, dict) for item in v):
+                    # For lists of dicts, add the first few as columns
+                    for i, item in enumerate(v[:3]):  # Limit to first 3 items
+                        list_key = f"{new_key}_{i+1}"
+                        items.extend(self._flatten_dict(item, list_key, sep=sep).items())
+                else:
+                    # Mixed or complex lists
+                    items.append((new_key, str(v)))
             else:
                 items.append((new_key, v))
         return dict(items)
@@ -375,17 +480,39 @@ class DataProcessor:
         try:
             path = Path(file_path)
             if not path.exists():
-                return {"error": "File not found"}
+                return {"error": f"File not found: {file_path}"}
             
-            stat = path.stat()
-            return {
+            file_info = {
+                "file_path": str(path),
                 "filename": path.name,
-                "size_bytes": stat.st_size,
-                "size_mb": round(stat.st_size / (1024 * 1024), 2),
-                "created_at": datetime.fromtimestamp(stat.st_ctime).isoformat(),
-                "modified_at": datetime.fromtimestamp(stat.st_mtime).isoformat(),
-                "extension": path.suffix
+                "size_bytes": path.stat().st_size,
+                "created": datetime.fromtimestamp(path.stat().st_ctime).isoformat(),
+                "modified": datetime.fromtimestamp(path.stat().st_mtime).isoformat(),
+                "format": path.suffix.lstrip('.')
             }
+            
+            # Add format-specific info
+            if path.suffix.lower() == '.csv':
+                with open(path, 'r') as f:
+                    headers = f.readline().strip().split(',')
+                    row_count = sum(1 for _ in f) + 1  # +1 for header
+                
+                file_info["headers"] = headers
+                file_info["row_count"] = row_count
+            
+            elif path.suffix.lower() == '.json':
+                with open(path, 'r') as f:
+                    json_data = json.load(f)
+                
+                file_info["structure"] = "object" if isinstance(json_data, dict) else "array"
+                if isinstance(json_data, dict):
+                    file_info["keys"] = list(json_data.keys())
+                elif isinstance(json_data, list):
+                    file_info["count"] = len(json_data)
+                    if json_data and isinstance(json_data[0], dict):
+                        file_info["sample_keys"] = list(json_data[0].keys())
+            
+            return file_info
             
         except Exception as e:
             logger.error(f"Error getting file info: {str(e)}")
@@ -394,12 +521,20 @@ class DataProcessor:
     def cleanup_old_files(self, days_old: int = 7):
         """Clean up output files older than specified days."""
         try:
-            cutoff_time = datetime.now().timestamp() - (days_old * 24 * 3600)
+            now = datetime.now()
+            cutoff = now.timestamp() - (days_old * 24 * 60 * 60)
             
-            for file_path in self.output_dir.iterdir():
-                if file_path.is_file() and file_path.stat().st_mtime < cutoff_time:
-                    file_path.unlink()
-                    logger.info(f"Deleted old output file: {file_path.name}")
+            count = 0
+            for file_path in self.output_dir.glob("*"):
+                if file_path.is_file():
+                    mtime = file_path.stat().st_mtime
+                    if mtime < cutoff:
+                        file_path.unlink()
+                        count += 1
+            
+            logger.info(f"Cleanup completed: removed {count} files older than {days_old} days")
+            return {"removed_files": count, "days_threshold": days_old}
                     
         except Exception as e:
-            logger.error(f"Error cleaning up old files: {str(e)}") 
+            logger.error(f"Error during file cleanup: {str(e)}")
+            return {"error": str(e)}
