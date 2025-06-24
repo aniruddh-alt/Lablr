@@ -39,11 +39,46 @@ export interface CreateJobRequest {
   batch_size?: number;
 }
 
+export interface BatchExtractionStatus {
+  job_id: string;
+  total_documents: number;
+  processed_documents: number;
+  successful_extractions: number;
+  failed_extractions: number;
+  estimated_completion?: string;
+  current_document?: string;
+}
+
+export interface Dataset {
+  id: string;
+  name: string;
+  description?: string;
+  created_at: string;
+}
+
 // API functions
 export const apiService = {
   // Document operations
   getDocuments: async (): Promise<Document[]> => {
     const response = await api.get('/documents');
+    return response.data;
+  },
+  
+  getDocument: async (documentId: string): Promise<Document> => {
+    const response = await api.get(`/documents/${documentId}`);
+    return response.data;
+  },
+
+  uploadDocument: async (file: File): Promise<Document> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    
+    const response = await api.post('/documents/upload', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+    
     return response.data;
   },
 
@@ -74,6 +109,11 @@ export const apiService = {
   deleteDocument: async (documentId: string): Promise<void> => {
     await api.delete(`/documents/${documentId}`);
   },
+  
+  reprocessDocument: async (documentId: string): Promise<Document> => {
+    const response = await api.post(`/documents/${documentId}/reprocess`);
+    return response.data;
+  },
 
   // Job operations
   getJobs: async (): Promise<ExtractionJob[]> => {
@@ -83,6 +123,11 @@ export const apiService = {
 
   getJob: async (jobId: string): Promise<ExtractionJob> => {
     const response = await api.get(`/extraction/jobs/${jobId}`);
+    return response.data;
+  },
+  
+  getJobStatus: async (jobId: string): Promise<BatchExtractionStatus> => {
+    const response = await api.get(`/extraction/jobs/${jobId}/status`);
     return response.data;
   },
 
@@ -117,6 +162,12 @@ export const apiService = {
     });
     return response.data;
   },
+  
+  // Dataset operations
+  getDatasets: async (): Promise<Dataset[]> => {
+    const response = await api.get('/datasets');
+    return response.data;
+  },
 
   // Health check
   healthCheck: async (): Promise<{ status: string }> => {
@@ -125,4 +176,4 @@ export const apiService = {
   },
 };
 
-export default apiService; 
+export default apiService;

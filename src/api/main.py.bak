@@ -7,99 +7,7 @@ import os
 import uuid
 import traceback
 from datetime import datetime, timezone
-from typing import List, Optional, Dict, Any
-
-from ..core.config import get_settings
-from ..core.database import SessionLocal, engine
-from ..models.models import Document as DBDocument, Job as DBJob, DocumentStatus as ORMDocumentStatus, JobStatus as ORMJobStatus, Base
-from ..models.extraction_job import ExtractionJob as DBExtractionJob
-from ..models.document import DocumentCreate, DocumentResponse, DocumentStatus as PyDocumentStatus
-from ..models.job import JobResponse
-from ..models.extraction import (
-    ExtractionJobCreate, ExtractionJobResponse, BatchExtractionStatus,
-    ExtractionResult, OutputFormat, ExtractionType
-)
-from ..services.azure_form_recognizer import AzureFormRecognizerService
-from ..services.azure_openai_service import AzureOpenAIService
-from ..services.data_processor import DataProcessor
-from ..workers.tasks import process_pdf_task, batch_extraction_task, single_document_extraction_task
-
-# Constants
-UPLOADS_DIR = "uploads"
-RESULTS_DIR = "results"
-NOT_FOUND_DETAIL = "Document not found"
-
-# Configure logging
-logger = logging.getLogger(__name__)
-settings = get_settings()
-
-# Create directories if they don't exist
-os.makedirs(UPLOADS_DIR, exist_ok=True)
-os.makedirs(RESULTS_DIR, exist_ok=True)
-
-app = FastAPI()
-
-# Enable CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # For development
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# Database dependency
-def get_db():
-    """Get database session."""
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-@app.post("/extraction/jobs", response_model=ExtractionJobResponse)
-async def create_extraction_job(job: ExtractionJobCreate, db: Session = Depends(get_db)):
-    """
-    Create a new extraction job to process multiple documents with a custom prompt.
-    
-    Args:
-        job: Extraction job configuration
-    
-    Returns:
-        Extraction job information and status
-    """
-    try:
-        # Generate unique job ID and start batch extraction
-        job_id = str(uuid.uuid4())
-        
-        # Start the extraction task via Celery
-        task = batch_extraction_task.delay(job_id, job.dict(), [])
-        task_id = task.id
-        
-        # Create database record for the extraction job
-        db_extraction_job = DBExtractionJob(
-            id=job_id,
-            name=job.name,
-            description=job.description,
-            document_ids=job.document_ids,
-            extraction_type=job.extraction_type,
-            output_format=job.output_format,
-            prompt=job.prompt,
-            status="started",
-            created_at=datetime.now(timezone.utc),
-            progress={"task_id": task_id}
-        )
-        
-        db.add(db_extraction_job)
-        db.commit()
-        
-        return ExtractionJobResponse.from_orm(db_extraction_job)
-    except Exception as e:
-        logger.error(f"Error creating extraction job: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Failed to create extraction job: {str(e)}")
-
-@app.get("/extraction/jobs/{job_id}", response_model=ExtractionJobResponse)
+from typing import List, Optional, D@app.get("/extraction/jobs/{job_id}", response_model=ExtractionJobResponse)
 async def get_extraction_job(job_id: str, db: Session = Depends(get_db)):
     """
     Get extraction job status and results.
@@ -146,39 +54,66 @@ async def get_extraction_job(job_id: str, db: Session = Depends(get_db)):
         raise HTTPException(
             status_code=500,
             detail=f"Failed to retrieve extraction job: {str(e)}"
-        )
+        )re.config import get_settings
+from ..core.database import SessionLocal, engine
+from ..models.models import Document as DBDocument, Job as DBJob, DocumentStatus as ORMDocumentStatus, JobStatus as ORMJobStatus, Base
+from ..models.extraction_job import ExtractionJob as DBExtractionJob
+from ..models.document import DocumentCreate, DocumentResponse, DocumentStatus as PyDocumentStatus
+from ..models.job import JobResponse
+from ..models.extraction import (
+    ExtractionJobCreate, ExtractionJobResponse, BatchExtractionStatus,
+    ExtractionResult, OutputFormat, ExtractionType
+)
+from ..services.azure_form_recognizer import AzureFormRecognizerService
+from ..services.azure_openai_service import AzureOpenAIService
+from ..services.data_processor import DataProcessor
+from ..workers.tasks import process_pdf_task, batch_extraction_task, single_document_extraction_task
 
-@app.get("/extraction/jobs", response_model=List[ExtractionJobResponse])
-async def list_extraction_jobs(
-    skip: int = 0,
-    limit: int = 100,
-    status: Optional[str] = None,
-    db: Session = Depends(get_db)
-):
-    """
-    List extraction jobs with optional filtering.
-    
-    Args:
-        skip: Number of jobs to skip
-        limit: Maximum number of jobs to return
-        status: Optional status filter
-    
-    Returns:
-        List of extraction jobs
-    """
+# Constants
+NOT_FOUND_DETAIL = "Document not found"
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Dependency to get DB session
+
+def get_db():
+    db = SessionLocal()
     try:
-        query = db.query(DBExtractionJob)
-        if status:
-            query = query.filter(DBExtractionJob.status == status)
-            
-        jobs = query.offset(skip).limit(limit).all()
-        return [ExtractionJobResponse.from_orm(job) for job in jobs]
-    except Exception as e:
-        logger.error(f"Error listing extraction jobs: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to list extraction jobs: {str(e)}"
-        )
+        yield db
+    finally:
+        db.close()
+
+# Initialize FastAPI app
+app = FastAPI(
+    title="Lablr API",
+    description="AI Data Labeler & ML Engineer API",
+    version="1.0.0"
+)
+
+# Configure CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Configure appropriately for production
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+settings = get_settings()
+# Create database tables
+Base.metadata.create_all(bind=engine)
+
+@app.get("/")
+async def root():
+    """Health check endpoint."""
+    return {
+        "message": "Lablr API is running",
+        "version": "1.0.0",
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
 @app.get("/health")
 async def health_check(db: Session = Depends(get_db)):
     """Detailed health check endpoint."""
@@ -221,9 +156,6 @@ async def upload_document(
         # Generate unique document ID
         document_id = str(uuid.uuid4())
         
-        # Create uploads directory if not exists
-        os.makedirs("uploads", exist_ok=True)
-        
         # Save file
         file_path = f"uploads/{document_id}_{file.filename}"
         
@@ -232,24 +164,20 @@ async def upload_document(
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, "wb") as f:
             f.write(content)
-            
-        logger.info(f"Saved uploaded file to {file_path}")
         
         # Create document record
         document = DBDocument(
             id=document_id,
             filename=file.filename,
             description=description,
-            status=ORMDocumentStatus.UPLOADED,  # Start as UPLOADED
+            status=ORMDocumentStatus.UPLOADED,
             upload_timestamp=datetime.now(timezone.utc),
             job_id=None
         )
         db.add(document)
         db.commit()
-        db.refresh(document)
-        logger.info(f"Created document record with ID {document_id} and status {document.status}")
         
-        # Start background job for processing
+        # Start background job
         job = process_pdf_task.delay(document_id, file_path)
         
         # Create job record
@@ -264,15 +192,9 @@ async def upload_document(
         # Link job to document
         document.job_id = job.id
         db.commit()
-        db.refresh(document)
         
-        logger.info(f"Document {document_id} uploaded and processing started with job {job.id}")
+        logger.info(f"Document {document_id} uploaded and processing started")
         return DocumentResponse.from_orm(document)
-        
-    except Exception as e:
-        logger.error(f"Error uploading document: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(e)}")
         
     except Exception as e:
         logger.error(f"Error uploading document: {str(e)}")
@@ -325,25 +247,14 @@ async def list_documents(
         if status:
             # Filter by document status enum
             query = query.filter(DBDocument.status == ORMDocumentStatus(status.value))
-        
-        # Order by upload timestamp descending (newest first)
-        query = query.order_by(DBDocument.upload_timestamp.desc())
-        
-        # Execute query
         docs = query.offset(skip).limit(limit).all()
-        
-        # Log how many documents we're returning
-        logger.info(f"Returning {len(docs)} documents (skip={skip}, limit={limit}, status={status})")
-        
-        # Convert to response model
         return [DocumentResponse.from_orm(doc) for doc in docs]
         
     except Exception as e:
         logger.error(f"Error listing documents: {str(e)}")
-        logger.error(traceback.format_exc())
         raise HTTPException(
             status_code=500,
-            detail=f"Failed to retrieve documents: {str(e)}"
+            detail="Failed to retrieve documents"
         )
 
 @app.get("/jobs/{job_id}", response_model=JobResponse)
@@ -564,7 +475,7 @@ async def download_extraction_results(job_id: str):
     raise HTTPException(status_code=501, detail="Not implemented")
 
 @app.get("/extraction/jobs/{job_id}/status", response_model=BatchExtractionStatus)
-async def get_extraction_job_status(job_id: str, db: Session = Depends(get_db)):
+async def get_extraction_job_status(job_id: str):
     """
     Get detailed status of extraction job.
     
@@ -574,75 +485,14 @@ async def get_extraction_job_status(job_id: str, db: Session = Depends(get_db)):
     Returns:
         Detailed job status
     """
-    try:
-        # Get job from database
-        job = db.query(DBExtractionJob).filter(DBExtractionJob.id == job_id).first()
-        
-        if not job:
-            raise HTTPException(status_code=404, detail="Extraction job not found")
-            
-        # Get Celery task status if available
-        from ..workers.celery_app import celery_app
-        task_info = {}
-        task_id = job.progress.get("task_id") if job.progress and isinstance(job.progress, dict) else None
-        
-        if task_id:
-            try:
-                result = celery_app.AsyncResult(task_id)
-                if result and result.info and isinstance(result.info, dict):
-                    task_info = result.info
-            except Exception as e:
-                logger.warning(f"Error getting Celery task info: {str(e)}")
-        
-        # Get document counts (ensuring defaults for all values)
-        total_documents = len(job.document_ids) if job.document_ids else 0
-        processed_documents = task_info.get("processed", 0) 
-        successful_extractions = task_info.get("successful", 0)
-        failed_extractions = task_info.get("failed", 0)
-        
-        # If we don't have info from task but job is completed/failed, set processed to total
-        if job.status in ["completed", "failed"] and processed_documents == 0:
-            processed_documents = total_documents
-            successful_extractions = total_documents if job.status == "completed" else 0
-            failed_extractions = 0 if job.status == "completed" else total_documents
-        
-        # Calculate estimated completion
-        estimated_completion = None
-        if job.status not in ["completed", "failed"] and processed_documents > 0 and total_documents > 0:
-            # Could add completion time estimation logic here based on progress
-            pass
-            
-        current_document = task_info.get("current_document", None)
-        
-        # Create response object with default values for any missing fields
-        return BatchExtractionStatus(
-            job_id=job_id,
-            total_documents=total_documents,
-            processed_documents=processed_documents,
-            successful_extractions=successful_extractions,
-            failed_extractions=failed_extractions,
-            estimated_completion=estimated_completion,
-            current_document=current_document
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting extraction job status: {str(e)}")
-        logger.error(traceback.format_exc())
-        # Return a valid response with default values instead of raising an error
-        return BatchExtractionStatus(
-            job_id=job_id,
-            total_documents=0,
-            processed_documents=0,
-            successful_extractions=0,
-            failed_extractions=0
-        )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Error getting extraction job status: {str(e)}")
-        logger.error(traceback.format_exc())
-        raise HTTPException(status_code=500, detail=f"Failed to get job status: {str(e)}")
+    # Placeholder: returns processing status only
+    from ..workers.celery_app import celery_app
+    result = celery_app.AsyncResult(job_id)
+    return BatchExtractionStatus(
+        id=job_id,
+        status=result.status.lower(),
+        progress=result.info if result.info else {}
+    )
 
 # ==================== BULK UPLOAD ENDPOINTS ====================
 

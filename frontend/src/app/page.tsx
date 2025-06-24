@@ -12,9 +12,11 @@ import {
   AlertCircle, 
   Loader2,
   Plus,
-  Eye
+  Eye,
+  RefreshCw
 } from 'lucide-react';
-import apiService, { Document, ExtractionJob } from '@/lib/api';
+import apiService, { Document, ExtractionJob, BatchExtractionStatus } from '@/lib/api';
+import config from '@/lib/config';
 
 export default function Dashboard() {
   const [activeTab, setActiveTab] = useState<'upload' | 'extract' | 'jobs'>('upload');
@@ -22,6 +24,8 @@ export default function Dashboard() {
   const [jobs, setJobs] = useState<ExtractionJob[]>([]);
   const [loading, setLoading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [jobStatuses, setJobStatuses] = useState<Record<string, BatchExtractionStatus>>({});
+  const [error, setError] = useState<string | null>(null);
 
   // File upload state
   const [selectedFiles, setSelectedFiles] = useState<FileList | null>(null);
@@ -33,6 +37,7 @@ export default function Dashboard() {
   const [outputFormat, setOutputFormat] = useState('csv');
   const [prompt, setPrompt] = useState('');
   const [selectedDocuments, setSelectedDocuments] = useState<string[]>([]);
+  const [reprocessingDocId, setReprocessingDocId] = useState<string | null>(null);
 
   // Load data on component mount
   useEffect(() => {
@@ -40,27 +45,66 @@ export default function Dashboard() {
     loadJobs();
   }, []);
 
+  // Set up polling for job statuses
+  useEffect(() => {
+    const pollInterval = setInterval(() => {
+      const activeJobs = jobs.filter(job => 
+        job.status !== 'completed' && job.status !== 'failed'
+      );
+      
+      if (activeJobs.length > 0) {
+        activeJobs.forEach(job => {
+          pollJobStatus(job.id);
+        });
+      }
+    }, config.pollInterval);
+
+    return () => clearInterval(pollInterval);
+  }, [jobs]);
+
+  const pollJobStatus = async (jobId: string) => {
+    try {
+      const status = await apiService.getJobStatus(jobId);
+      setJobStatuses(prev => ({
+        ...prev,
+        [jobId]: status
+      }));
+      
+      // If status has changed, refresh job list
+      if (status.status === 'completed' || status.status === 'failed') {
+        loadJobs();
+      }
+    } catch (error) {
+      console.error('Failed to poll job status:', error);
+    }
+  };
+
   const loadDocuments = async () => {
     try {
+      setError(null);
       const docs = await apiService.getDocuments();
       setDocuments(docs);
     } catch (error) {
       console.error('Failed to load documents:', error);
+      setError('Failed to load documents. Please try again.');
     }
   };
 
   const loadJobs = async () => {
     try {
+      setError(null);
       const jobsData = await apiService.getJobs();
       setJobs(jobsData);
     } catch (error) {
       console.error('Failed to load jobs:', error);
+      setError('Failed to load jobs. Please try again.');
     }
   };
 
   const handleFileUpload = async (files: FileList) => {
     setLoading(true);
     setUploadProgress(0);
+    setError(null);
 
     try {
       await apiService.uploadDocuments(files, (progress) => {
@@ -72,6 +116,7 @@ export default function Dashboard() {
       setSelectedFiles(null);
     } catch (error) {
       console.error('Upload failed:', error);
+      setError('Upload failed. Please try again.');
     } finally {
       setLoading(false);
       setUploadProgress(0);
@@ -92,6 +137,20 @@ export default function Dashboard() {
       setSelectedFiles(e.target.files);
     }
   };
+  
+  const handleReprocessDocument = async (documentId: string) => {
+    setReprocessingDocId(documentId);
+    try {
+      setError(null);
+      await apiService.reprocessDocument(documentId);
+      await loadDocuments();
+    } catch (error) {
+      console.error('Failed to reprocess document:', error);
+      setError('Failed to reprocess document. Please try again.');
+    } finally {
+      setReprocessingDocId(null);
+    }
+  };
 
   const createExtractionJob = async () => {
     if (!jobName || !prompt || selectedDocuments.length === 0) {
@@ -100,6 +159,7 @@ export default function Dashboard() {
     }
 
     setLoading(true);
+    setError(null);
     try {
       const jobConfig = {
         name: jobName,
@@ -122,8 +182,39 @@ export default function Dashboard() {
       await loadJobs();
     } catch (error) {
       console.error('Failed to create job:', error);
+      setError('Failed to create job. Please try again.');
     } finally {
       setLoading(false);
+    }
+  };
+  
+  const handleDownload = async (jobId: string) => {
+    try {
+      setError(null);
+      const blob = await apiService.downloadJobResults(jobId);
+      
+      // Create download link
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.style.display = 'none';
+      a.href = url;
+      
+      // Get job info for file name
+      const job = jobs.find(j => j.id === jobId);
+      const fileName = job ? 
+        `${job.name.replace(/\s+/g, '_')}_${job.extraction_type}_${job.output_format}.${job.output_format}` : 
+        `extraction_results.${job.output_format}`;
+      
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      
+      // Cleanup
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (error) {
+      console.error('Failed to download job results:', error);
+      setError('Failed to download job results. Please try again.');
     }
   };
 
@@ -131,9 +222,11 @@ export default function Dashboard() {
     switch (status) {
       case 'completed':
       case 'processed':
+      case 'success':
         return <CheckCircle className="h-5 w-5 text-green-500" />;
       case 'processing':
       case 'started':
+      case 'pending':
         return <Loader2 className="h-5 w-5 text-blue-500 animate-spin" />;
       case 'failed':
         return <AlertCircle className="h-5 w-5 text-red-500" />;
@@ -154,6 +247,15 @@ export default function Dashboard() {
               <span className="ml-2 text-sm text-gray-500">PDF Data Labeling</span>
             </div>
             <div className="flex items-center space-x-4">
+              <button 
+                className="p-2 text-gray-400 hover:text-gray-500"
+                onClick={() => {
+                  loadDocuments();
+                  loadJobs();
+                }}
+              >
+                <RefreshCw className="h-5 w-5" />
+              </button>
               <button className="p-2 text-gray-400 hover:text-gray-500">
                 <Settings className="h-5 w-5" />
               </button>
@@ -173,7 +275,7 @@ export default function Dashboard() {
             ].map(({ id, label, icon: Icon }) => (
               <button
                 key={id}
-                                 onClick={() => setActiveTab(id as 'upload' | 'extract' | 'jobs')}
+                onClick={() => setActiveTab(id as 'upload' | 'extract' | 'jobs')}
                 className={`${
                   activeTab === id
                     ? 'border-blue-500 text-blue-600'
@@ -187,6 +289,22 @@ export default function Dashboard() {
           </nav>
         </div>
       </div>
+
+      {/* Error Message */}
+      {error && (
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-2">
+          <div className="bg-red-50 border-l-4 border-red-400 p-4 mt-4">
+            <div className="flex">
+              <div className="flex-shrink-0">
+                <AlertCircle className="h-5 w-5 text-red-400" />
+              </div>
+              <div className="ml-3">
+                <p className="text-sm text-red-700">{error}</p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -265,8 +383,15 @@ export default function Dashboard() {
 
             {/* Documents List */}
             <div className="bg-white rounded-lg shadow">
-              <div className="px-6 py-4 border-b border-gray-200">
+              <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
                 <h3 className="text-lg font-semibold text-gray-900">Uploaded Documents</h3>
+                <button 
+                  onClick={loadDocuments}
+                  className="inline-flex items-center px-2 py-1 text-sm text-gray-600 hover:text-gray-900"
+                >
+                  <RefreshCw className="h-4 w-4 mr-1" />
+                  Refresh
+                </button>
               </div>
               <div className="divide-y divide-gray-200">
                 {documents.map((doc) => (
@@ -280,14 +405,31 @@ export default function Dashboard() {
                         </p>
                       </div>
                     </div>
-                    <span className={`px-2 py-1 text-xs rounded-full ${
-                      doc.status === 'processed' ? 'bg-green-100 text-green-800' :
-                      doc.status === 'processing' ? 'bg-blue-100 text-blue-800' :
-                      doc.status === 'failed' ? 'bg-red-100 text-red-800' :
-                      'bg-gray-100 text-gray-800'
-                    }`}>
-                      {doc.status}
-                    </span>
+                    <div className="flex items-center space-x-2">
+                      <span className={`px-2 py-1 text-xs rounded-full ${
+                        doc.status === 'processed' ? 'bg-green-100 text-green-800' :
+                        doc.status === 'processing' ? 'bg-blue-100 text-blue-800' :
+                        doc.status === 'failed' ? 'bg-red-100 text-red-800' :
+                        'bg-gray-100 text-gray-800'
+                      }`}>
+                        {doc.status}
+                      </span>
+                      
+                      {(doc.status === 'failed' || doc.status === 'processed') && (
+                        <button 
+                          onClick={() => handleReprocessDocument(doc.id)}
+                          disabled={reprocessingDocId === doc.id}
+                          className="ml-2 inline-flex items-center px-2 py-1 text-xs border border-gray-300 rounded-md text-gray-700 bg-white hover:bg-gray-50"
+                        >
+                          {reprocessingDocId === doc.id ? (
+                            <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+                          ) : (
+                            <RefreshCw className="h-3 w-3 mr-1" />
+                          )}
+                          Reprocess
+                        </button>
+                      )}
+                    </div>
                   </div>
                 ))}
                 {documents.length === 0 && (
@@ -349,7 +491,7 @@ export default function Dashboard() {
                     <option value="csv">CSV</option>
                     <option value="json">JSON</option>
                     <option value="xlsx">Excel</option>
-                    <option value="qa_pairs">Q&A Pairs</option>
+                    <option value="markdown">Markdown</option>
                   </select>
                 </div>
               </div>
@@ -423,8 +565,15 @@ export default function Dashboard() {
 
         {activeTab === 'jobs' && (
           <div className="bg-white rounded-lg shadow">
-            <div className="px-6 py-4 border-b border-gray-200">
+            <div className="px-6 py-4 border-b border-gray-200 flex justify-between items-center">
               <h3 className="text-lg font-semibold text-gray-900">Extraction Jobs</h3>
+              <button 
+                onClick={loadJobs}
+                className="inline-flex items-center px-2 py-1 text-sm text-gray-600 hover:text-gray-900"
+              >
+                <RefreshCw className="h-4 w-4 mr-1" />
+                Refresh
+              </button>
             </div>
             <div className="divide-y divide-gray-200">
               {jobs.map((job) => (
@@ -434,8 +583,8 @@ export default function Dashboard() {
                     <div className="flex items-center space-x-2">
                       {getStatusIcon(job.status)}
                       <span className={`px-2 py-1 text-xs rounded-full ${
-                        job.status === 'completed' ? 'bg-green-100 text-green-800' :
-                        job.status === 'started' ? 'bg-blue-100 text-blue-800' :
+                        job.status === 'completed' || job.status === 'success' ? 'bg-green-100 text-green-800' :
+                        job.status === 'started' || job.status === 'pending' ? 'bg-blue-100 text-blue-800' :
                         'bg-gray-100 text-gray-800'
                       }`}>
                         {job.status}
@@ -445,9 +594,20 @@ export default function Dashboard() {
                   <div className="text-sm text-gray-500">
                     <p>Type: {job.extraction_type} | Format: {job.output_format}</p>
                     <p>Documents: {job.document_ids.length} | Created: {new Date(job.created_at).toLocaleString()}</p>
+                    {jobStatuses[job.id] && jobStatuses[job.id].processed < jobStatuses[job.id].total && (
+                      <p className="mt-1">
+                        Progress: {jobStatuses[job.id].processed} / {jobStatuses[job.id].total} documents processed
+                      </p>
+                    )}
+                    {job.error_message && (
+                      <p className="mt-1 text-red-500">Error: {job.error_message}</p>
+                    )}
                   </div>
-                  {job.status === 'completed' && (
-                    <button className="mt-2 inline-flex items-center px-3 py-1 border border-gray-300 rounded-md text-xs font-medium text-gray-700 bg-white hover:bg-gray-50">
+                  {(job.status === 'completed' || job.status === 'success') && (
+                    <button 
+                      onClick={() => handleDownload(job.id)}
+                      className="mt-2 inline-flex items-center px-3 py-1 border border-gray-300 rounded-md text-xs font-medium text-gray-700 bg-white hover:bg-gray-50"
+                    >
                       <Download className="h-3 w-3 mr-1" />
                       Download Results
                     </button>

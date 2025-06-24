@@ -89,9 +89,9 @@ class ExtractionResult(BaseModel):
 class BatchExtractionStatus(BaseModel):
     """Schema for batch extraction status."""
     job_id: str
-    total_documents: int
-    processed_documents: int
-    successful_extractions: int
-    failed_extractions: int
+    total_documents: int = 0
+    processed_documents: int = 0
+    successful_extractions: int = 0
+    failed_extractions: int = 0
     estimated_completion: Optional[datetime] = None
     current_document: Optional[str] = None 

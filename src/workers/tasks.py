@@ -2,7 +2,7 @@ from celery import Celery
 from celery.utils.log import get_task_logger
 from typing import Dict, List, Any, Optional
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 import traceback
 import os
 
@@ -73,7 +73,7 @@ def process_pdf_task(self, document_id: str, file_path: str):
         logger.info(f"Starting PDF processing for document {document_id}")
         
         # Update document status in database
-        update_document_status(document_id, "PROCESSING", job_id=self.request.id)
+        update_document_status(document_id, ORMDocumentStatus.PROCESSING, job_id=self.request.id)
         
         # Update task status
         self.update_state(
@@ -134,7 +134,7 @@ def process_pdf_task(self, document_id: str, file_path: str):
         # Update job status
         update_job_status(
             self.request.id, 
-            "success", 
+            ORMJobStatus.SUCCESS, 
             result=result,
             completed_at=processing_completed
         )
@@ -142,7 +142,7 @@ def process_pdf_task(self, document_id: str, file_path: str):
         # Update document status
         update_document_status(
             document_id, 
-            "processed",
+            ORMDocumentStatus.PROCESSED,
             extracted_text=extracted_data['content'],
             processing_completed=processing_completed,
             confidence_scores={'text_extraction': extracted_data.get('confidence', 0.0)}
@@ -156,13 +156,13 @@ def process_pdf_task(self, document_id: str, file_path: str):
         logger.error(traceback.format_exc())
         
         # Update document status to failed
-        update_document_status(document_id, "failed")
+        update_document_status(document_id, ORMDocumentStatus.FAILED)
         
         # Update job status to failed
         if hasattr(self, 'request') and hasattr(self.request, 'id'):
             update_job_status(
                 self.request.id, 
-                "failure", 
+                ORMJobStatus.FAILURE, 
                 error=str(e),
                 completed_at=datetime.now()
             )
@@ -198,7 +198,7 @@ def batch_extraction_task(
         # Update job status to started
         update_job_status(
             job_id,
-            "started", 
+            ORMJobStatus.STARTED, 
             progress={"status": "starting", "progress": 0}
         )
         
@@ -224,7 +224,7 @@ def batch_extraction_task(
                     logger.error(f"Error fetching documents from database: {str(db_error)}")
                     update_job_status(
                     job_id, 
-                    "failure", 
+                    ORMJobStatus.FAILURE, 
                     error=f"Failed to fetch documents: {str(db_error)}",
                     completed_at=datetime.now()
                 )
@@ -258,15 +258,25 @@ def batch_extraction_task(
         extraction_type = job_config['extraction_type']
         prompt = job_config['prompt']
         
+        processed_count = 0
+        successful_count = 0
+        failed_count = 0
+        
         for i in range(0, total_docs, batch_size):
             batch = document_data[i:i + batch_size]
             
             # Update progress
             progress_pct = int((i / total_docs) * 100) if total_docs > 0 else 0
+            current_document = batch[0]['filename'] if batch else None
+            
             progress_info = {
                 'current': i,
                 'total': total_docs,
+                'processed': processed_count,
+                'successful': successful_count, 
+                'failed': failed_count,
                 'percent': progress_pct,
+                'current_document': current_document,
                 'status': f'Processing documents {i+1}-{min(i+batch_size, total_docs)} of {total_docs}'
             }
             
@@ -285,7 +295,7 @@ def batch_extraction_task(
             # Process batch based on extraction type
             for doc in batch:
                 try:
-                    start_time = datetime.utcnow()
+                    start_time = datetime.now(timezone.utc)
                     
                     if extraction_type == "structured_data":
                         result = openai_service.extract_structured_data(
@@ -320,7 +330,7 @@ def batch_extraction_task(
                             extraction_prompt=prompt
                         )
                     
-                    processing_time = (datetime.utcnow() - start_time).total_seconds()
+                    processing_time = (datetime.now(timezone.utc) - start_time).total_seconds()
                     
                     results.append({
                         'document_id': doc['id'],
@@ -330,6 +340,23 @@ def batch_extraction_task(
                         'processing_time': processing_time
                     })
                     
+                    # Update counters
+                    processed_count += 1
+                    successful_count += 1
+                    
+                    # Update progress info
+                    progress_info = {
+                        'current': i + len(batch),
+                        'total': total_docs,
+                        'processed': processed_count,
+                        'successful': successful_count,
+                        'failed': failed_count,
+                        'percent': int(((i + len(batch)) / total_docs) * 100) if total_docs > 0 else 0,
+                        'status': f'Processed {processed_count} of {total_docs} documents'
+                    }
+                    
+                    self.update_state(state='PROGRESS', meta=progress_info)
+                    
                 except Exception as doc_error:
                     logger.error(f"Error processing document {doc['id']}: {str(doc_error)}")
                     results.append({
@@ -338,6 +365,23 @@ def batch_extraction_task(
                         'status': 'error',
                         'error': str(doc_error)
                     })
+                    
+                    # Update counters
+                    processed_count += 1
+                    failed_count += 1
+                    
+                    # Update progress info
+                    progress_info = {
+                        'current': i + len(batch),
+                        'total': total_docs,
+                        'processed': processed_count,
+                        'successful': successful_count,
+                        'failed': failed_count,
+                        'percent': int(((i + len(batch)) / total_docs) * 100) if total_docs > 0 else 0,
+                        'status': f'Processed {processed_count} of {total_docs} documents'
+                    }
+                    
+                    self.update_state(state='PROGRESS', meta=progress_info)
         
         # Process results into output format
         self.update_state(
@@ -361,11 +405,12 @@ def batch_extraction_task(
             'job_id': job_id,
             'status': 'completed',
             'total_documents': total_docs,
-            'successful_extractions': len([r for r in results if r['status'] == 'success']),
-            'failed_extractions': len([r for r in results if r['status'] == 'error']),
+            'processed': total_docs,
+            'successful': successful_count,
+            'failed': failed_count,
             'output_file': output_info,
             'results': results,
-            'completed_at': datetime.utcnow().isoformat()
+            'completed_at': datetime.now(timezone.utc).isoformat()
         }
         
         logger.info(f"Successfully completed batch extraction job {job_id}")
@@ -379,7 +424,7 @@ def batch_extraction_task(
             'job_id': job_id,
             'status': 'failed',
             'error': str(e),
-            'completed_at': datetime.utcnow().isoformat()
+            'completed_at': datetime.now(timezone.utc).isoformat()
         }
 
 @celery_app.task(bind=True)
@@ -521,13 +566,13 @@ def single_document_extraction_task(
             'completed_at': datetime.now().isoformat()
         }
 
-def update_document_status(document_id: str, status: str, **kwargs):
+def update_document_status(document_id: str, status, **kwargs):
     """
     Update document status in the database.
     
     Args:
         document_id: Document ID
-        status: New status
+        status: New status (can be string or enum)
         **kwargs: Additional fields to update
     """
     try:
@@ -539,8 +584,27 @@ def update_document_status(document_id: str, status: str, **kwargs):
                 logger.warning(f"Document {document_id} not found in database")
                 return False
             
-            # Update status
-            document.status = ORMDocumentStatus(status)
+            old_status = document.status
+            
+            # Update status - handle both string and enum inputs
+            if isinstance(status, str):
+                # Try to match case-insensitively
+                matching_status = None
+                for enum_status in ORMDocumentStatus:
+                    if enum_status.value.upper() == status.upper():
+                        matching_status = enum_status
+                        break
+                        
+                if matching_status:
+                    document.status = matching_status
+                else:
+                    logger.error(f"Invalid document status: {status}")
+                    return False
+            else:
+                # Assume it's already an enum
+                document.status = status
+                
+            logger.info(f"Updating document {document_id} status from {old_status} to {document.status}")
             
             # Update additional fields
             if "extracted_text" in kwargs:
@@ -561,7 +625,7 @@ def update_document_status(document_id: str, status: str, **kwargs):
                 document.job_id = kwargs["job_id"]
             
             db.commit()
-            logger.info(f"Updated document {document_id} status to {status}")
+            logger.info(f"Updated document {document_id} status to {document.status}")
             return True
             
         finally:
@@ -572,13 +636,13 @@ def update_document_status(document_id: str, status: str, **kwargs):
         logger.error(traceback.format_exc())
         return False
 
-def update_job_status(job_id: str, status: str, **kwargs):
+def update_job_status(job_id: str, status, **kwargs):
     """
     Update job status in the database.
     
     Args:
         job_id: Job ID
-        status: New status
+        status: New status (can be string or enum)
         **kwargs: Additional fields to update
     """
     try:
@@ -590,8 +654,23 @@ def update_job_status(job_id: str, status: str, **kwargs):
                 logger.warning(f"Job {job_id} not found in database")
                 return False
             
-            # Update status
-            job.status = ORMJobStatus(status)
+            # Update status - handle both string and enum inputs
+            if isinstance(status, str):
+                # Try to match case-insensitively
+                matching_status = None
+                for enum_status in ORMJobStatus:
+                    if enum_status.value.upper() == status.upper():
+                        matching_status = enum_status
+                        break
+                        
+                if matching_status:
+                    job.status = matching_status
+                else:
+                    logger.error(f"Invalid job status: {status}")
+                    return False
+            else:
+                # Assume it's already an enum
+                job.status = status
             
             # Update additional fields
             if "result" in kwargs:
@@ -602,14 +681,16 @@ def update_job_status(job_id: str, status: str, **kwargs):
                 
             if "completed_at" in kwargs:
                 job.completed_at = kwargs["completed_at"]
-            elif status in ["success", "failure", "revoked"]:
+            elif isinstance(status, str) and status.lower() in ["success", "failure", "revoked"]:
+                job.completed_at = datetime.now()
+            elif isinstance(status, ORMJobStatus) and status in [ORMJobStatus.SUCCESS, ORMJobStatus.FAILURE, ORMJobStatus.REVOKED]:
                 job.completed_at = datetime.now()
                 
             if "progress" in kwargs:
                 job.progress = kwargs["progress"]
             
             db.commit()
-            logger.info(f"Updated job {job_id} status to {status}")
+            logger.info(f"Updated job {job_id} status to {job.status}")
             return True
             
         finally:
