@@ -19,8 +19,18 @@ class Settings(BaseSettings):
     azure_storage_connection_string: Optional[str] = os.getenv("AZURE_STORAGE_CONNECTION_STRING")
     azure_form_recognizer_endpoint: Optional[str] = os.getenv("AZURE_FORM_RECOGNIZER_ENDPOINT")
     azure_form_recognizer_key: Optional[str] = os.getenv("AZURE_FORM_RECOGNIZER_KEY")
+    
+    # Azure OpenAI Services
+    azure_openai_endpoint: Optional[str] = os.getenv("AZURE_OPENAI_ENDPOINT")
+    azure_openai_key: Optional[str] = os.getenv("AZURE_OPENAI_KEY")
+    azure_openai_api_version: str = os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+    azure_openai_deployment_name: str = os.getenv("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4")
+    
+    # Legacy naming for backward compatibility
     azure_cognitive_services_endpoint: Optional[str] = os.getenv("AZURE_COGNITIVE_SERVICES_ENDPOINT")
     azure_cognitive_services_key: Optional[str] = os.getenv("AZURE_COGNITIVE_SERVICES_KEY")
+    
+    # Azure ML
     azure_ml_workspace_name: Optional[str] = os.getenv("AZURE_ML_WORKSPACE_NAME")
     azure_ml_resource_group: Optional[str] = os.getenv("AZURE_ML_RESOURCE_GROUP")
     azure_ml_subscription_id: Optional[str] = os.getenv("AZURE_ML_SUBSCRIPTION_ID")
