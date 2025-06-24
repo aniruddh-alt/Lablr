@@ -12,7 +12,7 @@ import sys
 import os
 
 # Configuration
-API_BASE_URL = "http://localhost:8002"
+API_BASE_URL = "http://localhost:8000"
 PDF_PATH = "test_files/sample_invoice.pdf"
 POLL_INTERVAL = 2  # seconds
 
